@@ -79,11 +79,11 @@ class Checks:
         """
         return await (
             _banner("build", source)
+            .with_env_variable("D", FAKE_DIGEST)   # set BEFORE the exec that echoes it
             .with_exec([
                 "sh", "-c",
                 'echo "  pushed zot.viporlab.net/demo/app@$D"; echo "DIGEST=$D"',
             ])
-            .with_env_variable("D", FAKE_DIGEST)
             .stdout()
         )
 
