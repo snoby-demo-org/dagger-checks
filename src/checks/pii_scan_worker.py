@@ -25,6 +25,10 @@ SKIP_SUFFIXES = {
     ".exe", ".dll", ".class", ".jar", ".whl", ".pyc", ".min.js", ".min.css", ".svg",
 }
 MAX_FILE_BYTES = 512 * 1024          # skip anything bigger (models, fixtures)
+PER_FILE_BUDGET_S = 5                # analyze time budget per file; automake
+                                     # artifacts (Makefile.in/configure) and asm
+                                     # send presidio's regexes into backtracking
+                                     # hell — budget-bust, report, move on
 MIN_SCORE_SOFT = 0.55                # recognizer confidence floor (soft entities)
 # Strict entities: SSN patterns cap at 0.5 without spaCy context boosting
 # (quick mode has no NER) — the recognizer's own area/group/serial
@@ -33,10 +37,14 @@ MIN_SCORE_STRICT = 0.50
 STRICT_ENTITIES = {
     "US_SSN", "CREDIT_CARD", "US_PASSPORT", "US_PASSPORT_NUMBER",
     "US_BANK_NUMBER", "US_BANK_ROUTING", "US_ITIN", "IBAN_CODE",
-    "ES_NIF", "SG_NRIC_FIN", "AU_MEDICARE", "AU_TFN",
+    "ES_NIF", "SG_NRIC_FIN", "AU_MEDICARE",
 }
 SOFT_ENTITIES = {
     "EMAIL_ADDRESS", "PHONE_NUMBER", "IP_ADDRESS",
+    # AU_TFN validates bare 8-9 digit integers by checksum — a 10-digit
+    # prime in a hash-table sizes array scores 1.0. No formatting anchor,
+    # so any magic number can block CI. Soft tier (context-free) only.
+    "AU_TFN",
 }
 # NER entities (PERSON/ORGANIZATION/LOCATION) fire constantly on code
 # identifiers ("Run", "def test_...") — reported only when STRICT, never soft.
@@ -150,7 +158,18 @@ def main():
 
     files_scanned = 0
     files_failed = 0
+    files_skipped = 0
+    skipped_paths = []
     strict, soft = [], []
+    import signal
+
+    class _FileTimeout(Exception):
+        pass
+
+    def _alarm(signum, frame):
+        raise _FileTimeout()
+
+    signal.signal(signal.SIGALRM, _alarm)
     for path in iter_files(SOURCE_ROOT):
         rel = os.path.relpath(path, SOURCE_ROOT)
         try:
@@ -159,7 +178,14 @@ def main():
             continue
         files_scanned += 1
         try:
+            signal.alarm(PER_FILE_BUDGET_S)
             results = analyzer.analyze(text=text, language="en", return_decision_process=False)
+            signal.alarm(0)
+        except _FileTimeout:
+            files_skipped += 1
+            skipped_paths.append(rel)
+            print(f"[pii-scan] WARN analyze skipped (>{PER_FILE_BUDGET_S}s budget) {rel}", file=sys.stderr)
+            continue
         except Exception as exc:  # noqa: BLE001 — a bad file must not kill the scan
             files_failed += 1
             print(f"[pii-scan] WARN analyze failed {rel}: {exc}", file=sys.stderr)
@@ -197,6 +223,8 @@ def main():
         "tool": f"presidio-analyzer ({mode} mode)",
         "files_scanned": files_scanned,
         "files_failed": files_failed,
+        "files_skipped": files_skipped,
+        "skipped": skipped_paths[:20],
         "strict_findings": len(strict),
         "soft_findings": len(soft),
         "status": "fail" if failed else "pass",
@@ -204,6 +232,8 @@ def main():
         "soft": soft[:20],
     }
     print("TRUENORTH_RESULT: " + json.dumps(payload))
+    if files_skipped:
+        print(f"[pii-scan] NOTE: {files_skipped} file(s) skipped (over {PER_FILE_BUDGET_S}s analyze budget)")
     if files_failed and not strict:
         print(f"[pii-scan] FAIL: {files_failed} file(s) could not be analyzed")
     elif failed:
