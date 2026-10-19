@@ -1,9 +1,8 @@
-"""Shared CI checks for viporlab repos (Dagger module) — DEMO EDITION.
+"""Shared CI checks for viporlab repos (Dagger module).
 
-Every check is a NO-OP that prints a realistic banner and passes. The point
-of this edition is to demo the ASSEMBLY: config-driven routing, two-plane
-build/test split, zot digest handoff, Backstage/GHA visibility. Swap any stub
-body for the real tool when ready — signatures stay stable.
+REAL checks:  secrets-scan (Gitleaks v8.30.1), pii-scan (Microsoft Presidio 2.2.35).
+STUB checks:  lint, sast, format, private-key-check, build, test — swap any stub
+body for the real tool when ready; signatures stay stable.
 
 Config contract (repo-owned .github/goldenpath.yaml):
     checks:
@@ -20,6 +19,15 @@ from dagger import dag, function, object_type
 
 DEMO_IMAGE = "python:3.12-slim"
 FAKE_DIGEST = "sha256:9f2c8a1e4d7b3a6c5e0f1d2c3b4a59687766554433221100ffeeddccbbaa9988"
+
+# --- real tools (FR-14: version-pinned) ---
+GITLEAKS_IMAGE = "ghcr.io/gitleaks/gitleaks:v8.30.1"
+PRESIDIO_IMAGE = "python:3.12-slim"
+PRESIDIO_PIN = "presidio-analyzer==2.2.35"
+SPACY_MODEL_WHL = (
+    "https://github.com/explosion/spacy-models/releases/download/"
+    "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+)
 
 
 def _banner(check, source):
@@ -46,6 +54,80 @@ def _script(check):
 @object_type
 class Checks:
     @function
+    async def secrets_scan(self, source: dagger.Directory) -> str:
+        """REAL — Gitleaks secret scan (required class, FR-58/71).
+
+        Runs gitleaks `dir` scan over the source tree with the default 170+
+        rules, redacted JSON report. Fails the check when any secret-like
+        finding exists; emits the FR-7 TRUENORTH_RESULT contract line.
+        """
+        report = "gitleaks-report.json"
+        ctr = (
+            dag.container()
+            .from_(GITLEAKS_IMAGE)
+            .with_mounted_directory("/src", source)
+            .with_workdir("/src")
+            .with_exec([
+                "gitleaks", "dir", "/src",
+                "--no-banner", "--redact",
+                "--report-format", "json",
+                f"--report-path=/{report}",
+                "--exit-code", "0",   # we decide pass/fail ourselves from the report
+            ])
+        )
+        raw = await ctr.file(f"/{report}").contents()
+        import json
+
+        findings = json.loads(raw) if raw.strip() else []
+        payload = {
+            "check": "secrets-scan",
+            "tool": f"gitleaks@{GITLEAKS_IMAGE.rsplit(':', 1)[-1]}",
+            "findings": len(findings),
+            "status": "fail" if findings else "pass",
+        }
+        lines = [
+            "=" * 50,
+            " [secrets-scan] gitleaks (real)",
+            f"  findings: {len(findings)}",
+        ]
+        for f in findings[:10]:
+            lines.append(
+                f"  {f.get('File','?')}:{f.get('StartLine','?')} rule={f.get('RuleID','?')}"
+            )
+        lines.append(f"TRUENORTH_RESULT: {json.dumps(payload)}")
+        lines.append("=" * 50)
+        if findings:
+            raise RuntimeError(f"gitleaks: {len(findings)} secret finding(s) (see job log)")
+        return "\n".join(lines)
+
+    @function
+    async def pii_scan(self, source: dagger.Directory) -> str:
+        """REAL — Microsoft Presidio PII scan (required class, FR-58/71).
+
+        presidio-analyzer (pinned) + en_core_web_sm over text source files.
+        Strict entities (SSN/credit-card/passport/bank) FAIL the check;
+        soft entities (email/phone/IP/names) are reported only.
+        """
+        import os
+
+        install = (
+            f"pip install --cache-dir=/cache/pip {PRESIDIO_PIN} {SPACY_MODEL_WHL} "
+            "&& python /tmp/pii_scan_worker.py"
+        )
+        worker_path = os.path.join(os.path.dirname(__file__), "pii_scan_worker.py")
+        worker_src = open(worker_path).read()
+        ctr = (
+            dag.container()
+            .from_(PRESIDIO_IMAGE)
+            .with_mounted_cache("/cache/pip", dag.cache_volume("presidio-pip"))
+            .with_new_file("/tmp/pii_scan_worker.py", worker_src)
+            .with_mounted_directory("/src", source)
+            .with_workdir("/src")
+            .with_exec(["sh", "-c", install])
+        )
+        return await ctr.stdout()
+
+    @function
     async def lint(self, source: dagger.Directory) -> str:
         """STUB — prints ruff-style pass banner, exits 0."""
         return await _banner("lint", source).stdout()
@@ -54,11 +136,6 @@ class Checks:
     async def sast(self, source: dagger.Directory) -> str:
         """STUB — static analysis (semgrep/bandit-shaped) pass banner, exits 0."""
         return await _banner("sast", source).stdout()
-
-    @function
-    async def pii_scan(self, source: dagger.Directory) -> str:
-        """STUB — secrets/PII scan (gitleaks-shaped) pass banner, exits 0."""
-        return await _banner("pii-scan", source).stdout()
 
     @function
     async def format(self, source: dagger.Directory) -> str:
