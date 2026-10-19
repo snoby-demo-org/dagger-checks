@@ -77,17 +77,51 @@ def iter_files(root):
             yield path
 
 
+class _NoOpNlpEngine:
+    """Minimal NlpEngine stand-in for quick mode (pattern recognizers only).
+
+    Pattern recognizers never call the NLP engine, so an inert engine keeps
+    the analyzer happy without loading spaCy. Same trick Presidio's own
+    tests use (TestNlpEngine).
+    """
+
+    def process_text(self, text, language):  # noqa: ANN001, ANN201
+        from presidio_analyzer.nlp_engine import NlpEngineResult, EntitiesGroup
+
+        return NlpEngineResult(entities={}, tokens=[], text=text)
+
+    def is_stopword(self, word, language):  # noqa: ANN001, ANN201
+        return False
+
+    def is_punct(self, word, language):  # noqa: ANN001, ANN201
+        return False
+
+    def get_nlp_engine(self):  # noqa: ANN201
+        return self
+
+    def is_loaded(self) -> bool:
+        return True
+
+    def get_supported_entities(self, lang=None):  # noqa: ANN001, ANN201
+        return []
+
+
 def main():
     from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
-    from presidio_analyzer.nlp_engine import NlpEngineProvider
 
-    nlp_conf = {
-        "nlp_engine_name": "spacy",
-        "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
-    }
-    nlp_engine = NlpEngineProvider(nlp_configuration=nlp_conf).create_engine()
+    mode = os.environ.get("PII_MODE", "quick")
     registry = RecognizerRegistry()
-    analyzer = AnalyzerEngine(nlp_engine=nlp_engine, registry=registry)
+    if mode == "full":
+        from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+        nlp_conf = {
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+        }
+        nlp_engine = NlpEngineProvider(nlp_configuration=nlp_conf).create_engine()
+        analyzer = AnalyzerEngine(nlp_engine=nlp_engine, registry=registry)
+    else:
+        analyzer = AnalyzerEngine(nlp_engine=_NoOpNlpEngine(), registry=registry)
 
     files_scanned = 0
     strict, soft = [], []
@@ -125,9 +159,9 @@ def main():
             (strict if r.entity_type in STRICT_ENTITIES else soft).append(entry)
 
     failed = bool(strict)
-    result = {
+    payload = {
         "check": "pii-scan",
-        "tool": "presidio-analyzer",
+        "tool": f"presidio-analyzer ({mode} mode)",
         "files_scanned": files_scanned,
         "strict_findings": len(strict),
         "soft_findings": len(soft),
@@ -135,7 +169,7 @@ def main():
         "strict": strict[:20],
         "soft": soft[:20],
     }
-    print("TRUENORTH_RESULT: " + json.dumps(result))
+    print("TRUENORTH_RESULT: " + json.dumps(payload))
     if failed:
         print(f"[pii-scan] FAIL: {len(strict)} strict PII finding(s)")
         for e in strict[:10]:

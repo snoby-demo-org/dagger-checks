@@ -101,17 +101,25 @@ class Checks:
         return "\n".join(lines)
 
     @function
-    async def pii_scan(self, source: dagger.Directory) -> str:
+    async def pii_scan(self, source: dagger.Directory, ner: bool = False) -> str:
         """REAL — Microsoft Presidio PII scan (required class, FR-58/71).
 
-        presidio-analyzer (pinned) + en_core_web_sm over text source files.
+        Default: QUICK mode — pattern recognizers only (SSN, credit card,
+        email, phone, IP, IBAN...), no NLP model. Seconds, not minutes.
+        ner=True opts into full NER (spaCy en_core_web_sm) for doc-heavy
+        repos — much slower.
+
         Strict entities (SSN/credit-card/passport/bank) FAIL the check;
-        soft entities (email/phone/IP/names) are reported only.
+        soft entities (email/phone/IP) are reported only.
         """
         import os
 
+        mode = "full" if ner else "quick"
+        pkgs = PRESIDIO_PIN
+        if ner:
+            pkgs += f" {SPACY_MODEL_WHL}"
         install = (
-            f"pip install --cache-dir=/cache/pip {PRESIDIO_PIN} {SPACY_MODEL_WHL} "
+            f"pip install --cache-dir=/cache/pip {pkgs} "
             "&& python /tmp/pii_scan_worker.py"
         )
         worker_path = os.path.join(os.path.dirname(__file__), "pii_scan_worker.py")
@@ -122,6 +130,7 @@ class Checks:
             .with_mounted_cache("/cache/pip", dag.cache_volume("presidio-pip"))
             .with_new_file("/tmp/pii_scan_worker.py", worker_src)
             .with_mounted_directory("/src", source)
+            .with_env_variable("PII_MODE", mode)
             .with_workdir("/src")
             .with_exec(["sh", "-c", install])
         )
