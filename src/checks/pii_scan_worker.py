@@ -25,7 +25,11 @@ SKIP_SUFFIXES = {
     ".exe", ".dll", ".class", ".jar", ".whl", ".pyc", ".min.js", ".min.css", ".svg",
 }
 MAX_FILE_BYTES = 512 * 1024          # skip anything bigger (models, fixtures)
-MIN_SCORE = 0.55                     # recognizer confidence floor
+MIN_SCORE_SOFT = 0.55                # recognizer confidence floor (soft entities)
+# Strict entities: SSN patterns cap at 0.5 without spaCy context boosting
+# (quick mode has no NER) — the recognizer's own area/group/serial
+# validation is the real filter at that tier.
+MIN_SCORE_STRICT = 0.50
 STRICT_ENTITIES = {
     "US_SSN", "CREDIT_CARD", "US_PASSPORT", "US_PASSPORT_NUMBER",
     "US_BANK_NUMBER", "US_BANK_ROUTING", "US_ITIN", "IBAN_CODE",
@@ -77,6 +81,29 @@ def iter_files(root):
             yield path
 
 
+class _NoOpNlpArtifacts:
+    """Duck-typed stand-in for presidio's NlpArtifacts.
+
+    The concrete class wants a spaCy Doc, which quick mode deliberately
+    doesn't install — and the result type moved between presidio versions
+    (NlpArtifacts in 2.2.35, NlpEngineResult later), so importing it is a
+    portability trap. Consumers only attribute-access: empty `tokens`
+    short-circuits LemmaContextAwareEnhancer's lemmatization, and pattern
+    recognizers never touch the engine anyway.
+    """
+
+    tokens = []
+    tokens_indices = []
+    lemmas = []
+    keywords = []
+    entities = []
+    scores = []
+    nlp_engine_name = "noop"
+
+    def to_json(self):  # noqa: ANN201
+        return "{}"
+
+
 class _NoOpNlpEngine:
     """Minimal NlpEngine stand-in for quick mode (pattern recognizers only).
 
@@ -86,9 +113,7 @@ class _NoOpNlpEngine:
     """
 
     def process_text(self, text, language):  # noqa: ANN001, ANN201
-        from presidio_analyzer.nlp_engine import NlpEngineResult, EntitiesGroup
-
-        return NlpEngineResult(entities={}, tokens=[], text=text)
+        return _NoOpNlpArtifacts()
 
     def is_stopword(self, word, language):  # noqa: ANN001, ANN201
         return False
@@ -124,6 +149,7 @@ def main():
         analyzer = AnalyzerEngine(nlp_engine=_NoOpNlpEngine(), registry=registry)
 
     files_scanned = 0
+    files_failed = 0
     strict, soft = [], []
     for path in iter_files(SOURCE_ROOT):
         rel = os.path.relpath(path, SOURCE_ROOT)
@@ -135,13 +161,17 @@ def main():
         try:
             results = analyzer.analyze(text=text, language="en", return_decision_process=False)
         except Exception as exc:  # noqa: BLE001 — a bad file must not kill the scan
+            files_failed += 1
             print(f"[pii-scan] WARN analyze failed {rel}: {exc}", file=sys.stderr)
             continue
         seen = set()
         for r in results:
-            if r.score < MIN_SCORE or r.entity_type in ("URL", "DATE_TIME"):
+            if r.entity_type in ("URL", "DATE_TIME"):
                 continue
-            if r.entity_type not in STRICT_ENTITIES and r.entity_type not in SOFT_ENTITIES:
+            strict_hit = r.entity_type in STRICT_ENTITIES
+            if not strict_hit and r.entity_type not in SOFT_ENTITIES:
+                continue
+            if r.score < (MIN_SCORE_STRICT if strict_hit else MIN_SCORE_SOFT):
                 continue
             key = (r.entity_type, r.start // 64)
             if key in seen:
@@ -158,11 +188,15 @@ def main():
             }
             (strict if r.entity_type in STRICT_ENTITIES else soft).append(entry)
 
-    failed = bool(strict)
+    # Required-class honesty (FR-58/59/71): a file we could not analyze is a
+    # file we cannot claim is clean — an unscannable file FAILS the check
+    # instead of silently passing.
+    failed = bool(strict) or files_failed > 0
     payload = {
         "check": "pii-scan",
         "tool": f"presidio-analyzer ({mode} mode)",
         "files_scanned": files_scanned,
+        "files_failed": files_failed,
         "strict_findings": len(strict),
         "soft_findings": len(soft),
         "status": "fail" if failed else "pass",
@@ -170,7 +204,9 @@ def main():
         "soft": soft[:20],
     }
     print("TRUENORTH_RESULT: " + json.dumps(payload))
-    if failed:
+    if files_failed and not strict:
+        print(f"[pii-scan] FAIL: {files_failed} file(s) could not be analyzed")
+    elif failed:
         print(f"[pii-scan] FAIL: {len(strict)} strict PII finding(s)")
         for e in strict[:10]:
             print(f"  {e['file']}:{e['line']} {e['entity']} score={e['score']} :: {e['excerpt']}")
