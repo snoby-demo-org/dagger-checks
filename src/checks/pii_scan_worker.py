@@ -14,6 +14,7 @@ without breaking every pipeline.
 
 import json
 import os
+import re
 import sys
 
 SOURCE_ROOT = os.environ.get("PII_SOURCE_ROOT", "/src")
@@ -46,6 +47,16 @@ SOFT_ENTITIES = {
     # so any magic number can block CI. Soft tier (context-free) only.
     "AU_TFN",
 }
+# Module/registry refs are not people. Presidio's "Email (Medium)" regex has
+# a slash-tolerant local part and digit-tolerant domain labels, so a versioned
+# module path like github.com/org/repo@v1.0.5 matches as EMAIL_ADDRESS with
+# score 1.0 (tldextract validates it through the real github.com public
+# suffix). Drop any match whose ENTIRE matched text is a versioned ref: a
+# path (>=1 slash) followed by @version with at least one digit. Real
+# addresses (john@example.com — no slash) are untouched.
+_MODULE_REF_RE = re.compile(
+    r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+@[A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*$"
+)
 # NER entities (PERSON/ORGANIZATION/LOCATION) fire constantly on code
 # identifiers ("Run", "def test_...") — reported only when STRICT, never soft.
 
@@ -234,6 +245,8 @@ def main():
         seen = set()
         for r in results:
             if r.entity_type in ("URL", "DATE_TIME"):
+                continue
+            if _MODULE_REF_RE.match(text[r.start:r.end]):
                 continue
             strict_hit = r.entity_type in STRICT_ENTITIES
             if not strict_hit and r.entity_type not in SOFT_ENTITIES:
