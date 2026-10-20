@@ -22,7 +22,11 @@ FAKE_DIGEST = "sha256:9f2c8a1e4d7b3a6c5e0f1d2c3b4a59687766554433221100ffeeddccbb
 
 # --- real tools (FR-14: version-pinned) ---
 GITLEAKS_IMAGE = "ghcr.io/gitleaks/gitleaks:v8.30.1"
-PRESIDIO_IMAGE = "python:3.12-slim"
+# Presidio stack PREBAKED (build-scanner-image.yml): quick mode runs with zero
+# runtime install — a cold `pip install presidio+spacy` on every ephemeral
+# engine was ~6 of pii-scan's 9 minutes. Full mode (ner=True) still installs
+# the spaCy model wheel at run time (opt-in, heavy by design).
+PRESIDIO_IMAGE = "ghcr.io/snoby-demo-org/pii-scanner:presidio-2.2.35"
 PRESIDIO_PIN = "presidio-analyzer==2.2.35"
 SPACY_MODEL_WHL = (
     "https://github.com/explosion/spacy-models/releases/download/"
@@ -111,28 +115,31 @@ class Checks:
 
         Strict entities (SSN/credit-card/passport/bank) FAIL the check;
         soft entities (email/phone/IP) are reported only.
+
+        Incremental scope (v1.0.5): if the source root contains
+        truenorth-changed-files.txt (one path per line, written by the
+        pipeline), only those files are scanned. Absent/empty manifest =
+        full-tree scan (no evidence = never narrow a required check).
         """
         import os
 
         mode = "full" if ner else "quick"
-        pkgs = PRESIDIO_PIN
+        # quick mode: stack is prebaked into PRESIDIO_IMAGE — no runtime install.
+        # full mode: still needs the spaCy model wheel (heavy, opt-in).
         if ner:
-            pkgs += f" {SPACY_MODEL_WHL}"
-        install = (
-            f"pip install --cache-dir=/cache/pip {pkgs} "
-            "&& python /tmp/pii_scan_worker.py"
-        )
+            cmd = f"pip install --cache-dir=/cache/pip {SPACY_MODEL_WHL} && python /tmp/pii_scan_worker.py"
+        else:
+            cmd = "python /tmp/pii_scan_worker.py"
         worker_path = os.path.join(os.path.dirname(__file__), "pii_scan_worker.py")
         worker_src = open(worker_path).read()
         ctr = (
             dag.container()
             .from_(PRESIDIO_IMAGE)
-            .with_mounted_cache("/cache/pip", dag.cache_volume("presidio-pip"))
             .with_new_file("/tmp/pii_scan_worker.py", worker_src)
             .with_mounted_directory("/src", source)
             .with_env_variable("PII_MODE", mode)
             .with_workdir("/src")
-            .with_exec(["sh", "-c", install])
+            .with_exec(["sh", "-c", cmd])
         )
         return await ctr.stdout()
 

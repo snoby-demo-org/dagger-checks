@@ -1,0 +1,31 @@
+name: Build pii-scanner image
+
+# Rebuilds the prebaked PII scanner image (presidio stack) and pushes it to
+# GHCR. Rebuild on dependency bump: edit the image tag in src/checks/main.py
+# (PRESIDIO_IMAGE) and this workflow, then bump the module version.
+# amd64 native on the ARC runner (dind) — matches the nodes that pull it.
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['tools/pii-scanner/**']
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: k8s-runner
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and push scanner image
+        env:
+          IMAGE: ghcr.io/snoby-demo-org/pii-scanner:presidio-2.2.35
+        run: |
+          docker build --platform linux/amd64 -t "$IMAGE" tools/pii-scanner
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE"
+          docker logout ghcr.io

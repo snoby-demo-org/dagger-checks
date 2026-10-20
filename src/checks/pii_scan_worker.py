@@ -156,6 +156,47 @@ def main():
     else:
         analyzer = AnalyzerEngine(nlp_engine=_NoOpNlpEngine(), registry=registry)
 
+    # Incremental scope: if the caller dropped a changed-file manifest into
+    # the source root, scan ONLY those files. Absent/empty manifest = no
+    # change info available — scan the FULL tree (required-class honesty:
+    # never narrow a scan without evidence; deep-scan runs get full scope by
+    # simply not shipping a manifest).
+    manifest = os.environ.get("PII_MANIFEST", os.path.join(SOURCE_ROOT, "truenorth-changed-files.txt"))
+    manifest_entries = []
+    if os.path.isfile(manifest):
+        with open(manifest, encoding="utf-8") as fh:
+            manifest_entries = list(dict.fromkeys(ln.strip() for ln in fh if ln.strip()))
+    use_manifest = bool(manifest_entries)
+
+    def _acceptable(path):
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return None
+        if size == 0 or size > MAX_FILE_BYTES:
+            return None
+        if not is_text(os.path.basename(path)):
+            try:
+                with open(path, "rb") as fh:
+                    if b"\x00" in fh.read(8192):
+                        return None
+            except OSError:
+                return None
+        return path
+
+    if use_manifest:
+        files = []
+        root_prefix = SOURCE_ROOT.rstrip(os.sep) + os.sep
+        for rel in manifest_entries:
+            path = os.path.normpath(os.path.join(SOURCE_ROOT, rel))
+            if path != SOURCE_ROOT and not path.startswith(root_prefix):
+                continue  # refuse to escape the source root
+            if _acceptable(path):
+                files.append(path)
+        print(f"[pii-scan] scope=changed: {len(files)}/{len(manifest_entries)} manifest file(s) present")
+    else:
+        files = list(iter_files(SOURCE_ROOT))
+
     files_scanned = 0
     files_failed = 0
     files_skipped = 0
@@ -170,7 +211,7 @@ def main():
         raise _FileTimeout()
 
     signal.signal(signal.SIGALRM, _alarm)
-    for path in iter_files(SOURCE_ROOT):
+    for path in files:
         rel = os.path.relpath(path, SOURCE_ROOT)
         try:
             text = open(path, encoding="utf-8", errors="replace").read()
@@ -221,6 +262,8 @@ def main():
     payload = {
         "check": "pii-scan",
         "tool": f"presidio-analyzer ({mode} mode)",
+        "scope": "changed" if use_manifest else "full",
+        "manifest_files": len(manifest_entries) if use_manifest else None,
         "files_scanned": files_scanned,
         "files_failed": files_failed,
         "files_skipped": files_skipped,
