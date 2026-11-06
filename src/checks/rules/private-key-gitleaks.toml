@@ -1,0 +1,36 @@
+# Gitleaks config for the TrueNorth private-key-check (required class).
+# ONLY private-key material rules — the default 170-rule secret set is
+# secrets-scan's job; keeping this config standalone avoids double-reporting.
+title = "TrueNorth private-key-check"
+[extend]
+# no default extend: standalone rule set on purpose
+
+[[rules]]
+id = "pem-private-key"
+description = "PEM-encoded private key block"
+regex = '''-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----'''
+keywords = ["PRIVATE KEY"]
+
+[[rules]]
+id = "wif-base58-key"
+description = "Wallet Import Format (Base58, 51-52 chars, leading 5/K/L)"
+regex = '''\b(?:[59][1-9A-HJ-NP-Za-km-z]{50}|K[1-9A-HJ-NP-Za-km-z]{51}|L[1-9A-HJ-NP-Za-km-z]{51})\b'''
+keywords = ["5", "K", "L"]
+
+[[rules]]
+id = "hex-private-key-keyword"
+description = "64-hex-char private key adjacent to a private-key/WIF/secret-key keyword"
+regex = '''(?i)(?:priv(?:ate)?[_-]?key|wif|secret[_-]?key|spend[_-]?key|view[_-]?key)[^A-Za-z0-9]{0,8}[0-9a-fA-F]{64}\b'''
+keywords = ["priv", "wif", "secret", "spend", "view"]
+
+[[rules]]
+id = "bip39-mnemonic-keyword"
+description = "12/24-word BIP39-style mnemonic preceded by a seed/mnemonic/recovery keyword"
+regex = '''(?i)\b(?:seed|mnemonic|recovery[_ -]?phrase|mnemonic[_ -]?seed)\b[^"']{0,16}(?:[a-z]{3,8}[ ]){11}[a-z]{3,8}\b'''
+keywords = ["seed", "mnemonic", "recovery"]
+
+[[rules]]
+id = "identity-seed-hex"
+description = "128-hex-char (64-byte) seed-like blob assigned to a seed/identity variable"
+regex = '''(?i)(?:seed|identity|entropy)[^A-Za-z0-9]{0,8}[0-9a-fA-F]{128}\b'''
+keywords = ["seed", "identity", "entropy"]

@@ -1,0 +1,63 @@
+# Custom C/C++ security ruleset for the TrueNorth sast check.
+# Deliberately OFFLINE (no semgrep registry fetch — the engine pods must not
+# need egress to semgrep.dev) and deliberately SMALL: this is an advisory
+# signal on a legacy C++ tree, not a gate. Rules target classic memory/API
+# hazards that are cheap to detect with zero tuning.
+rules:
+  - id: c-dangerous-strcpy
+    message: strcpy() does not bound the copy — prefer strncpy/snprintf or explicit bounds
+    severity: WARNING
+    languages: [c, cpp]
+    pattern: strcpy($D, $S)
+
+  - id: c-dangerous-strcat
+    message: strcat() does not bound the append — prefer strncat/snprintf
+    severity: WARNING
+    languages: [c, cpp]
+    pattern: strcat($D, $S)
+
+  - id: c-dangerous-sprintf
+    message: sprintf() has no output bound — prefer snprintf
+    severity: WARNING
+    languages: [c, cpp]
+    pattern: sprintf($D, ...)
+
+  - id: c-dangerous-gets
+    message: gets() is unbounded and removed from the C standard — remove it
+    severity: ERROR
+    languages: [c, cpp]
+    pattern: gets(...)
+
+  - id: c-shell-exec-system
+    message: system()/popen() runs a shell — audit the command for injection if any part is dynamic
+    severity: WARNING
+    languages: [c, cpp]
+    pattern-either:
+      - pattern: system($CMD)
+      - pattern: popen($CMD, ...)
+
+  - id: c-scanf-unbounded-string
+    message: scanf with unbounded %s can overflow the destination buffer
+    severity: WARNING
+    languages: [c, cpp]
+    pattern-regex: (?:\b(?:f|s)?scanf\s*\([^)]*?%s)
+
+  - id: c-insecure-rand
+    message: rand()/random() are not cryptographically secure — do not use for keys/nonces/tokens
+    severity: WARNING
+    languages: [c, cpp]
+    pattern-either:
+      - pattern: rand(...)
+      - pattern: random(...)
+
+  - id: c-alloca-stack-risk
+    message: alloca() on deep/loopy call paths can exhaust the stack — prefer fixed buffers or heap
+    severity: WARNING
+    languages: [c, cpp]
+    pattern: alloca(...)
+
+  - id: c-itoa-nonportable
+    message: itoa() is non-standard — use snprintf
+    severity: WARNING
+    languages: [c, cpp]
+    pattern: itoa(...)

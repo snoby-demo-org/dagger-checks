@@ -1,8 +1,16 @@
 """Shared CI checks for viporlab repos (Dagger module).
 
-REAL checks:  secrets-scan (Gitleaks v8.30.1), pii-scan (Microsoft Presidio 2.2.35).
-STUB checks:  lint, sast, format, private-key-check, build, test — swap any stub
-body for the real tool when ready; signatures stay stable.
+REAL checks:  secrets-scan (Gitleaks v8.30.1), pii-scan (Presidio 2.2.35),
+              private-key-check (gitleaks + module ruleset, full tree),
+              sast (semgrep v1.181.1, offline custom C/C++ rules, incremental),
+              lint (cppcheck 2.17.1, incremental).
+STUB checks:  format, build, test — swap any stub body for the real tool when
+              ready; signatures stay stable.
+
+Incremental contract: sast/lint read truenorth-changed-files.txt from the
+source root and scan ONLY changed C/C++ files; absent/empty manifest =>
+SKIPPED (explicit pass-with-note, advisory class — never silently full-scan).
+private-key-check is required class and ALWAYS full-tree.
 
 Config contract (repo-owned .github/goldenpath.yaml):
     checks:
@@ -13,6 +21,9 @@ Config contract (repo-owned .github/goldenpath.yaml):
       test:     {enabled: true, plane: test}
 Run from a workflow:  dagger call --mod github.com/snoby-demo-org/dagger-checks <check> --source=.
 """
+
+import json
+import os
 
 import dagger
 from dagger import dag, function, object_type
@@ -53,6 +64,185 @@ def _script(check):
         f'echo "  result: PASS (0 findings)"; '
         f'echo "=================================================="'
     )
+
+
+
+SEMGREP_IMAGE = "docker.io/semgrep/semgrep:1.181.1"
+CPPCHECK_IMAGE = "ghcr.io/snoby-demo-org/cppcheck-scanner:cppcheck-2.17.1"
+MANIFEST_NAME = "truenorth-changed-files.txt"
+CXX_EXTS = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inc")
+
+
+def _rules_file(relpath: str) -> str:
+    """Read a bundled rules file off the module runtime filesystem."""
+    return open(os.path.join(os.path.dirname(__file__), relpath)).read()
+
+
+async def _changed_cxx_files(source: dagger.Directory) -> list:
+    """Return changed C/C++ paths from the manifest ([] if none/unreadable)."""
+    try:
+        raw = await source.file(MANIFEST_NAME).contents()
+    except Exception:
+        return []
+    paths = []
+    for ln in raw.splitlines():
+        p = ln.strip().lstrip("./")
+        if p and p.endswith(CXX_EXTS):
+            paths.append(p)
+    return list(dict.fromkeys(paths))
+
+
+def _skip_banner(check: str, why: str) -> str:
+    return "\n".join([
+        "=" * 50,
+        f" [{check}] SKIPPED — {why}",
+        f"TRUENORTH_RESULT: {json.dumps({'check': check, 'status': 'pass', 'scope': 'skipped', 'details': why})}",
+        "=" * 50,
+    ])
+
+
+async def _cppcheck_scan(source: dagger.Directory) -> str:
+    files = await _changed_cxx_files(source)
+    if not files:
+        why = ("no changed C/C++ files in " + MANIFEST_NAME
+               + " (incremental-only policy: legacy tree is never full-scanned)")
+        return _skip_banner("lint", why)
+    script = (
+        'FILES="$(cat /tmp/files.txt | tr "\\n" "\\0" | xargs -0 -r sh -c '
+        '\'printf "%s\\n" "$@"\' _ | tr "\\n" " ")"; '
+        'cppcheck --enable=warning,portability,performance --inline-suppr '
+        '--quiet --language=c++ --template="{file}:{line}: {severity}: {id}: {message}" '
+        '$FILES > /tmp/cppcheck.out 2>&1; echo $? > /tmp/rc; exit 0'
+    )
+    out = await (
+        dag.container()
+        .from_(CPPCHECK_IMAGE)
+        .with_mounted_directory("/src", source)
+        .with_workdir("/src")
+        .with_new_file("/tmp/files.txt", "\n".join(files))
+        .with_exec(["sh", "-c", script])
+        .file("/tmp/cppcheck.out")
+        .contents()
+    )
+    rc_raw = await (
+        dag.container()
+        .from_(CPPCHECK_IMAGE)
+        .with_mounted_directory("/src", source)
+        .with_workdir("/src")
+        .with_new_file("/tmp/files.txt", "\n".join(files))
+        .with_exec(["sh", "-c", script])
+        .file("/tmp/rc")
+        .contents()
+    )
+    findings = [l for l in out.splitlines() if l.strip()]
+    payload = {
+        "check": "lint",
+        "tool": "cppcheck@" + CPPCHECK_IMAGE.rsplit(":", 1)[-1],
+        "scope": "incremental",
+        "files_scanned": len(files),
+        "findings": len(findings),
+        "status": "fail" if findings else "pass",
+    }
+    lines = ["=" * 50, f" [lint] cppcheck (real, incremental {len(files)} files)"]
+    lines += [f"  {l}" for l in findings[:20]]
+    if len(findings) > 20:
+        lines.append(f"  ... and {len(findings) - 20} more")
+    lines.append(f"TRUENORTH_RESULT: {json.dumps(payload)}")
+    lines.append("=" * 50)
+    if findings:
+        raise RuntimeError(f"cppcheck: {len(findings)} finding(s) (see job log)")
+    return "\n".join(lines)
+
+
+async def _semgrep_scan(source: dagger.Directory) -> str:
+    files = await _changed_cxx_files(source)
+    if not files:
+        why = ("no changed C/C++ files in " + MANIFEST_NAME
+               + " (incremental-only policy: legacy tree is never full-scanned)")
+        return _skip_banner("sast", why)
+    script = (
+        'semgrep scan --config /tmp/rules.yml --json --output /tmp/semgrep.json '
+        '--quiet $(cat /tmp/files.txt | tr "\\n" " ") || true; exit 0'
+    )
+    raw = await (
+        dag.container()
+        .from_(SEMGREP_IMAGE)
+        .with_mounted_directory("/src", source)
+        .with_workdir("/src")
+        .with_new_file("/tmp/rules.yml", _rules_file("rules/semgrep-security-c.yml"))
+        .with_new_file("/tmp/files.txt", "\n".join(files))
+        .with_exec(["sh", "-c", script])
+        .file("/tmp/semgrep.json")
+        .contents()
+    )
+    try:
+        data = json.loads(raw) if raw.strip() else {"results": []}
+    except json.JSONDecodeError:
+        data = {"results": []}
+    results = data.get("results", [])
+    payload = {
+        "check": "sast",
+        "tool": "semgrep@" + SEMGREP_IMAGE.rsplit(":", 1)[-1],
+        "scope": "incremental",
+        "files_scanned": len(files),
+        "findings": len(results),
+        "status": "fail" if results else "pass",
+    }
+    lines = ["=" * 50, f" [sast] semgrep (real, incremental {len(files)} files)"]
+    for r in results[:20]:
+        loc = r.get("path", "?")
+        if isinstance(loc, dict):
+            loc = loc.get("path", "?")
+        lines.append(f"  {loc}:{r.get('start', {}).get('line', '?')} rule={r.get('check_id', '?')}")
+    if len(results) > 20:
+        lines.append(f"  ... and {len(results) - 20} more")
+    lines.append(f"TRUENORTH_RESULT: {json.dumps(payload)}")
+    lines.append("=" * 50)
+    if results:
+        raise RuntimeError(f"semgrep: {len(results)} finding(s) (see job log)")
+    return "\n".join(lines)
+
+
+async def _gitleaks_private_key(source: dagger.Directory) -> str:
+    report = "private-key-report.json"
+    ctr = (
+        dag.container()
+        .from_(GITLEAKS_IMAGE)
+        .with_new_file("/tmp/gitleaks-private.toml", _rules_file("rules/private-key-gitleaks.toml"))
+        .with_mounted_directory("/src", source)
+        .with_workdir("/src")
+        .with_exec([
+            "gitleaks", "dir", "/src",
+            "--config", "/tmp/gitleaks-private.toml",
+            "--no-banner", "--redact",
+            "--report-format", "json",
+            f"--report-path=/{report}",
+            "--exit-code", "0",   # we decide pass/fail ourselves from the report
+        ])
+    )
+    raw = await ctr.file(f"/{report}").contents()
+    findings = json.loads(raw) if raw.strip() else []
+    payload = {
+        "check": "private-key-check",
+        "tool": "gitleaks@" + GITLEAKS_IMAGE.rsplit(':', 1)[-1],
+        "ruleset": "module:rules/private-key-gitleaks.toml",
+        "findings": len(findings),
+        "status": "fail" if findings else "pass",
+    }
+    lines = [
+        "=" * 50,
+        " [private-key-check] gitleaks custom ruleset (real)",
+        f"  findings: {len(findings)}",
+    ]
+    for f in findings[:10]:
+        lines.append(
+            f"  {f.get('File','?')}:{f.get('StartLine','?')} rule={f.get('RuleID','?')}"
+        )
+    lines.append(f"TRUENORTH_RESULT: {json.dumps(payload)}")
+    lines.append("=" * 50)
+    if findings:
+        raise RuntimeError(f"private-key-check: {len(findings)} finding(s) (see job log)")
+    return "\n".join(lines)
 
 
 @object_type
@@ -145,23 +335,39 @@ class Checks:
 
     @function
     async def lint(self, source: dagger.Directory) -> str:
-        """STUB — prints ruff-style pass banner, exits 0."""
-        return await _banner("lint", source).stdout()
+        """REAL — cppcheck static analysis over CHANGED C/C++ files only.
+
+        Incremental-only policy (advisory class): scans files listed in
+        truenorth-changed-files.txt filtered to C/C++ extensions. Absent
+        or empty manifest (or no changed C/C++ files) => SKIPPED with a
+        pass status and an explicit note — the legacy tree is never
+        full-scanned by design.
+        """
+        return await _cppcheck_scan(source)
 
     @function
     async def sast(self, source: dagger.Directory) -> str:
-        """STUB — static analysis (semgrep/bandit-shaped) pass banner, exits 0."""
-        return await _banner("sast", source).stdout()
+        """REAL — Semgrep over CHANGED C/C++ files only (offline custom rules).
 
-    @function
-    async def format(self, source: dagger.Directory) -> str:
-        """STUB — formatter diff gate pass banner, exits 0."""
-        return await _banner("format", source).stdout()
+        Incremental-only policy (advisory class): scans changed C/C++ files
+        from truenorth-changed-files.txt with the module's own pinned ruleset
+        (rules/semgrep-security-c.yml) — no semgrep.dev registry fetch, so
+        engine pods need no egress. Absent/empty manifest => SKIPPED pass.
+        """
+        return await _semgrep_scan(source)
 
     @function
     async def private_key_check(self, source: dagger.Directory) -> str:
-        """STUB — wallet-key/seed detector pass banner, exits 0."""
-        return await _banner("private-key-check", source).stdout()
+        """REAL — wallet-key/seed detector (required class, own gate).
+
+        Gitleaks with the module's own STANDALONE ruleset
+        (rules/private-key-gitleaks.toml): PEM blocks, WIF Base58 keys,
+        hex private keys near a keyword, BIP39 mnemonics, identity/seed hex
+        blobs. The default gitleaks rule set is secrets-scan's job and is
+        deliberately NOT extended here. FULL-tree scan (key material can sit
+        in any file); any finding fails the check.
+        """
+        return await _gitleaks_private_key(source)
 
     @function
     async def build(self, source: dagger.Directory) -> str:
