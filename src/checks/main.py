@@ -68,7 +68,7 @@ def _script(check):
 
 
 SEMGREP_IMAGE = "docker.io/semgrep/semgrep:1.181.1"
-CPPCHECK_IMAGE = "ghcr.io/snoby-demo-org/cppcheck-scanner:cppcheck-2.17.1"
+CPPCHECK_IMAGE = "registry.viporlab.net/demo/cppcheck-scanner:cppcheck-2.17.1"
 MANIFEST_NAME = "truenorth-changed-files.txt"
 CXX_EXTS = (".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inc")
 

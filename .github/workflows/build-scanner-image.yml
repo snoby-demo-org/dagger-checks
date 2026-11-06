@@ -37,11 +37,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Create buildx builder (LAN registry trust)
+        run: |
+          printf '[registry."registry.viporlab.net"]\n  http = false\n  insecure = true\n' > buildkitd.toml
+          docker buildx create --name cppcheck-release --driver docker-container --config buildkitd.toml --use
+          docker buildx inspect cppcheck-release --bootstrap
+
       - name: Build and push cppcheck scanner image
         env:
-          IMAGE: ghcr.io/snoby-demo-org/cppcheck-scanner:cppcheck-2.17.1
+          IMAGE: registry.viporlab.net/demo/cppcheck-scanner:cppcheck-2.17.1
         run: |
-          docker build --platform linux/amd64 -t "$IMAGE" tools/cppcheck-scanner
-          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker push "$IMAGE"
-          docker logout ghcr.io
+          docker buildx build --platform linux/amd64 --push -t "$IMAGE" tools/cppcheck-scanner
+          curl -sk "https://registry.viporlab.net/v2/demo/cppcheck-scanner/manifests/cppcheck-2.17.1" \
+            -H "Accept: application/vnd.oci.image.manifest.v1+json" -o /dev/null -w "verify=%{http_code}\n"

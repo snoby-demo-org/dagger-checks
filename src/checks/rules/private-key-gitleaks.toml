@@ -5,6 +5,18 @@ title = "TrueNorth private-key-check"
 [extend]
 # no default extend: standalone rule set on purpose
 
+# Path allowlist: crypto unit-test vectors and docs legitimately contain
+# WIF/hex key examples (base58_keys_invalid.json, key_tests.cpp, ed25519
+# test vectors, payment-disclosure.md). Key material in NON-test source
+# still fails. Paths are matched by gitleaks against the file path.
+[allowlist]
+paths = [
+    '''(^|/)doc(s)?/''',
+    '''(^|/)tests?/''',
+    '''(^|/)(test_[^/]*|[^/]*_test)\.(c|cc|cpp|cxx|h|hpp|py)$''',
+    '''(^|/)qa/''',
+]
+
 [[rules]]
 id = "pem-private-key"
 description = "PEM-encoded private key block"
