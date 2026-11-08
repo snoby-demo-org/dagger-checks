@@ -168,16 +168,24 @@ def main():
         analyzer = AnalyzerEngine(nlp_engine=_NoOpNlpEngine(), registry=registry)
 
     # Incremental scope: if the caller dropped a changed-file manifest into
-    # the source root, scan ONLY those files. Absent/empty manifest = no
-    # change info available — scan the FULL tree (required-class honesty:
-    # never narrow a scan without evidence; deep-scan runs get full scope by
-    # simply not shipping a manifest).
+    # the source root, scan ONLY those files — PRESENCE is the signal, not
+    # content. An EMPTY manifest means the diff (HEAD~1..HEAD) touched zero
+    # files (empty commit): scope=changed with 0 files is the honest answer,
+    # not a reason to sweep the whole tree. A MISSING manifest means no
+    # change info at all (first run / deep-scan dispatch / legacy caller) —
+    # fall back to the FULL tree.
+    #
+    # Depth policy (never conflate with scope): the full-tree fallback runs
+    # in whatever mode the caller set — quick by default. Nothing here
+    # escalates depth because scope widened; deep NER (PII_MODE=full) is an
+    # explicit opt-in only (module ner=True).
     manifest = os.environ.get("PII_MANIFEST", os.path.join(SOURCE_ROOT, "truenorth-changed-files.txt"))
+    manifest_present = os.path.isfile(manifest)
     manifest_entries = []
-    if os.path.isfile(manifest):
+    if manifest_present:
         with open(manifest, encoding="utf-8") as fh:
             manifest_entries = list(dict.fromkeys(ln.strip() for ln in fh if ln.strip()))
-    use_manifest = bool(manifest_entries)
+    use_manifest = manifest_present
 
     def _acceptable(path):
         try:
@@ -207,6 +215,8 @@ def main():
         print(f"[pii-scan] scope=changed: {len(files)}/{len(manifest_entries)} manifest file(s) present")
     else:
         files = list(iter_files(SOURCE_ROOT))
+        print(f"[pii-scan] scope=full (no manifest at {manifest}) — mode={mode} "
+              f"(deep NER is an explicit opt-in, never a scope-fallback default)")
 
     files_scanned = 0
     files_failed = 0

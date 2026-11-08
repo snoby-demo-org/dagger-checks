@@ -306,10 +306,14 @@ class Checks:
         Strict entities (SSN/credit-card/passport/bank) FAIL the check;
         soft entities (email/phone/IP) are reported only.
 
-        Incremental scope (v1.0.5): if the source root contains
+        Incremental scope (v1.1.1): if the source root contains
         truenorth-changed-files.txt (one path per line, written by the
-        pipeline), only those files are scanned. Absent/empty manifest =
-        full-tree scan (no evidence = never narrow a required check).
+        pipeline), only those files are scanned — PRESENCE is the signal:
+        an EMPTY manifest (empty commit / zero-file diff) is an honest
+        0-file scan, a MISSING manifest (first run, deep-scan dispatch,
+        legacy caller) falls back to the full tree. Depth never
+        auto-escalates with scope: the fallback runs quick mode; deep NER
+        stays an explicit opt-in via ner=True.
         """
         import os
 
