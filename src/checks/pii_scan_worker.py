@@ -12,12 +12,34 @@ identifiers) always blocks; contact-info noise in docs/READMEs is surfaced
 without breaking every pipeline.
 """
 
+import fnmatch
 import json
 import os
 import re
 import sys
 
 SOURCE_ROOT = os.environ.get("PII_SOURCE_ROOT", "/src")
+# Repo-owned exclusion list: one path or glob per line, relative to the source
+# root, '#' comments. Excluded files are NOT scanned (documented in the repo
+# with the reason). Portability contract: the module carries no project paths —
+# the repo declares them, same pattern as .gitleaksignore.
+IGNORE_FILE = os.environ.get("PII_IGNORE", os.path.join(SOURCE_ROOT, ".piiignore"))
+
+
+def _load_ignores(path=IGNORE_FILE):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = [ln.split("#")[0].strip() for ln in fh]
+        return [ln for ln in lines if ln]
+    except OSError:
+        return []
+
+
+def _is_ignored(rel, patterns):
+    for pat in patterns:
+        if fnmatch.fnmatch(rel, pat) or fnmatch.fnmatch(rel, pat.rstrip("/") + "/*"):
+            return True
+    return False
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "__pycache__", "dist", "build", "site"}
 SKIP_SUFFIXES = {
@@ -221,6 +243,12 @@ def main():
     files_scanned = 0
     files_failed = 0
     files_skipped = 0
+    files_ignored = 0
+    ignored_paths = []
+    ignored_patterns = _load_ignores()
+    if ignored_patterns:
+        print(f"[pii-scan] .piiignore: {len(ignored_patterns)} declared exclusion(s): "
+              f"{ignored_patterns}")
     skipped_paths = []
     strict, soft = [], []
     import signal
@@ -234,6 +262,11 @@ def main():
     signal.signal(signal.SIGALRM, _alarm)
     for path in files:
         rel = os.path.relpath(path, SOURCE_ROOT)
+        if ignored_patterns and _is_ignored(rel, ignored_patterns):
+            files_ignored += 1
+            if len(ignored_paths) < 20:
+                ignored_paths.append(rel)
+            continue
         try:
             text = open(path, encoding="utf-8", errors="replace").read()
         except OSError:
@@ -291,6 +324,9 @@ def main():
         "files_failed": files_failed,
         "files_skipped": files_skipped,
         "skipped": skipped_paths[:20],
+        "files_ignored": files_ignored,
+        "ignore_file": os.path.relpath(IGNORE_FILE, SOURCE_ROOT) if ignored_patterns else None,
+        "ignored": ignored_paths[:20],
         "strict_findings": len(strict),
         "soft_findings": len(soft),
         "status": "fail" if failed else "pass",
