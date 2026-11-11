@@ -311,6 +311,12 @@ class Checks:
         from the scan — for upstream fixture/doc false positives a repo cannot
         fix. The payload reports files_ignored / ignored / ignore_file.
 
+        Repo-owned exclusions (v1.1.2): a `.piiignore` file at the source root
+        (one path or glob per line, relative to the source root, '#' comments)
+        excludes files from the scan — for upstream fixture/doc false positives
+        a repo cannot fix. The payload reports files_ignored / ignored /
+        ignore_file. Absent file = unchanged full behavior.
+
         Incremental scope (v1.1.1): if the source root contains
         truenorth-changed-files.txt (one path per line, written by the
         pipeline), only those files are scanned — PRESENCE is the signal:
